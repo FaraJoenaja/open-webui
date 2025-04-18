@@ -5,6 +5,9 @@ import uuid
 from typing import Any
 import json
 import asyncio
+import inspect
+import random
+
 import backend.api.hooks.post_message as post_message
 
 from fastapi import Request, status
@@ -40,9 +43,6 @@ from open_webui.utils.filter import (
     process_filter_functions,
 )
 from open_webui.env import SRC_LOG_LEVELS, GLOBAL_LOG_LEVEL, BYPASS_MODEL_ACCESS_CONTROL
-
-import inspect
-import random
 
 logging.basicConfig(stream=sys.stdout, level=GLOBAL_LOG_LEVEL)
 log = logging.getLogger(__name__)
@@ -249,3 +249,180 @@ async def generate_chat_completion(
 
 
 chat_completion = generate_chat_completion
+
+
+async def chat_completed(request: Request, form_data: dict, user: Any):
+    if not request.app.state.MODELS:
+        await get_all_models(request, user=user)
+
+    if getattr(request.state, "direct", False) and hasattr(request.state, "model"):
+        models = {
+            request.state.model["id"]: request.state.model,
+        }
+    else:
+        models = request.app.state.MODELS
+
+    data = form_data
+    model_id = data["model"]
+    if model_id not in models:
+        raise Exception("Model not found")
+
+    model = models[model_id]
+
+    try:
+        data = await process_pipeline_outlet_filter(request, data, user, models)
+    except Exception as e:
+        return Exception(f"Error: {e}")
+
+    metadata = {
+        "chat_id": data["chat_id"],
+        "message_id": data["id"],
+        "session_id": data["session_id"],
+        "user_id": user.id,
+    }
+
+    extra_params = {
+        "__event_emitter__": get_event_emitter(metadata),
+        "__event_call__": get_event_call(metadata),
+        "__user__": {
+            "id": user.id,
+            "email": user.email,
+            "name": user.name,
+            "role": user.role,
+        },
+        "__metadata__": metadata,
+        "__request__": request,
+        "__model__": model,
+    }
+
+    try:
+        filter_functions = [
+            Functions.get_function_by_id(filter_id)
+            for filter_id in get_sorted_filter_ids(model)
+        ]
+
+        result, _ = await process_filter_functions(
+            request=request,
+            filter_functions=filter_functions,
+            filter_type="outlet",
+            form_data=data,
+            extra_params=extra_params,
+        )
+        return result
+    except Exception as e:
+        return Exception(f"Error: {e}")
+
+
+async def chat_action(request: Request, action_id: str, form_data: dict, user: Any):
+    if "." in action_id:
+        action_id, sub_action_id = action_id.split(".")
+    else:
+        sub_action_id = None
+
+    action = Functions.get_function_by_id(action_id)
+    if not action:
+        raise Exception(f"Action not found: {action_id}")
+
+    if not request.app.state.MODELS:
+        await get_all_models(request, user=user)
+
+    if getattr(request.state, "direct", False) and hasattr(request.state, "model"):
+        models = {
+            request.state.model["id"]: request.state.model,
+        }
+    else:
+        models = request.app.state.MODELS
+
+    data = form_data
+    model_id = data["model"]
+
+    if model_id not in models:
+        raise Exception("Model not found")
+    model = models[model_id]
+
+    __event_emitter__ = get_event_emitter(
+        {
+            "chat_id": data["chat_id"],
+            "message_id": data["id"],
+            "session_id": data["session_id"],
+            "user_id": user.id,
+        }
+    )
+    __event_call__ = get_event_call(
+        {
+            "chat_id": data["chat_id"],
+            "message_id": data["id"],
+            "session_id": data["session_id"],
+            "user_id": user.id,
+        }
+    )
+
+    if action_id in request.app.state.FUNCTIONS:
+        function_module = request.app.state.FUNCTIONS[action_id]
+    else:
+        function_module, _, _ = load_function_module_by_id(action_id)
+        request.app.state.FUNCTIONS[action_id] = function_module
+
+    if hasattr(function_module, "valves") and hasattr(function_module, "Valves"):
+        valves = Functions.get_function_valves_by_id(action_id)
+        function_module.valves = function_module.Valves(**(valves if valves else {}))
+
+    if hasattr(function_module, "action"):
+        try:
+            action = function_module.action
+
+            sig = inspect.signature(action)
+            params = {"body": data}
+
+            extra_params = {
+                "__model__": model,
+                "__id__": sub_action_id if sub_action_id is not None else action_id,
+                "__event_emitter__": __event_emitter__,
+                "__event_call__": __event_call__,
+                "__request__": request,
+            }
+
+            for key, value in extra_params.items():
+                if key in sig.parameters:
+                    params[key] = value
+
+            if "__user__" in sig.parameters:
+                __user__ = {
+                    "id": user.id,
+                    "email": user.email,
+                    "name": user.name,
+                    "role": user.role,
+                }
+
+                try:
+                    if hasattr(function_module, "UserValves"):
+                        __user__["valves"] = function_module.UserValves(
+                            **Functions.get_user_valves_by_id_and_user_id(
+                                action_id, user.id
+                            )
+                        )
+                except Exception as e:
+                    log.exception(f"Failed to get user values: {e}")
+
+                params = {**params, "__user__": __user__}
+
+            if inspect.iscoroutinefunction(action):
+                data = await action(**params)
+            else:
+                data = action(**params)
+
+            try:
+                post_message.handle(
+                    data["prompt"],
+                    user.name,
+                    metadata.get("chat_id", "unknown")
+                )
+            except Exception as e:
+                print("🛑 Failed to post message log:", e)
+
+            return data
+
+        except Exception as e:
+            return Exception(f"Error: {e}")
+
+    return data
