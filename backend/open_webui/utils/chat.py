@@ -1,47 +1,32 @@
 import time
 import logging
 import sys
-
-from aiocache import cached
-from typing import Any, Optional
-import random
-import json
-import inspect
 import uuid
+import json
 import asyncio
 import backend.api.hooks.post_message as post_message
 
-
 from fastapi import Request, status
 from starlette.responses import Response, StreamingResponse, JSONResponse
-
-
 from open_webui.models.users import UserModel
-
 from open_webui.socket.main import (
     sio,
     get_event_call,
     get_event_emitter,
 )
 from open_webui.functions import generate_function_chat_completion
-
 from open_webui.routers.openai import (
     generate_chat_completion as generate_openai_chat_completion,
 )
-
 from open_webui.routers.ollama import (
     generate_chat_completion as generate_ollama_chat_completion,
 )
-
 from open_webui.routers.pipelines import (
     process_pipeline_inlet_filter,
     process_pipeline_outlet_filter,
 )
-
 from open_webui.models.functions import Functions
 from open_webui.models.models import Models
-
-
 from open_webui.utils.plugin import load_function_module_by_id
 from open_webui.utils.models import get_all_models, check_model_access
 from open_webui.utils.payload import convert_payload_openai_to_ollama
@@ -53,9 +38,7 @@ from open_webui.utils.filter import (
     get_sorted_filter_ids,
     process_filter_functions,
 )
-
 from open_webui.env import SRC_LOG_LEVELS, GLOBAL_LOG_LEVEL, BYPASS_MODEL_ACCESS_CONTROL
-
 
 logging.basicConfig(stream=sys.stdout, level=GLOBAL_LOG_LEVEL)
 log = logging.getLogger(__name__)
@@ -71,13 +54,11 @@ async def generate_direct_chat_completion(
     log.info("generate_direct_chat_completion")
 
     metadata = form_data.pop("metadata", {})
-
     user_id = metadata.get("user_id")
     session_id = metadata.get("session_id")
     request_id = str(uuid.uuid4())  # Generate a unique request ID
 
     event_caller = get_event_call(metadata)
-
     channel = f"{user_id}:{session_id}:{request_id}"
 
     if form_data.get("stream"):
@@ -447,16 +428,17 @@ async def chat_action(request: Request, action_id: str, form_data: dict, user: A
                 data = await action(**params)
             else:
                 data = action(**params)
-try:
-    post_message.handle(
-        data["prompt"],
-        user.name,
-        metadata.get("chat_id", "unknown")
-    )
-except Exception as e:
-    print("🛑 Failed to post message log:", e)
 
-                return data
+            try:
+                post_message.handle(
+                    data["prompt"],
+                    user.name,
+                    metadata.get("chat_id", "unknown")
+                )
+            except Exception as e:
+                print("🛑 Failed to post message log:", e)
+
+            return data
 
         except Exception as e:
             return Exception(f"Error: {e}")
