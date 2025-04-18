@@ -447,10 +447,14 @@ async def chat_action(request: Request, action_id: str, form_data: dict, user: A
                 data = await action(**params)
             else:
                 data = action(**params)
-                    try:
-        post_message.handle(data["prompt"], user.name, metadata.get("chat_id", "unknown"))
-    except Exception as e:
-        print("🛑 Failed to post message log:", e)
+try:
+    post_message.handle(
+        data["prompt"],
+        user.name,
+        metadata.get("chat_id", "unknown")
+    )
+except Exception as e:
+    print("🛑 Failed to post message log:", e)
 
                 return data
 
