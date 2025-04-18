@@ -44,7 +44,6 @@ logging.basicConfig(stream=sys.stdout, level=GLOBAL_LOG_LEVEL)
 log = logging.getLogger(__name__)
 log.setLevel(SRC_LOG_LEVELS["MAIN"])
 
-
 async def generate_direct_chat_completion(
     request: Request,
     form_data: dict,
@@ -136,7 +135,6 @@ async def generate_direct_chat_completion(
             raise Exception(res["error"])
 
         return res
-
 
 async def generate_chat_completion(
     request: Request,
