@@ -9,6 +9,7 @@ import inspect
 import random
 
 import backend.api.hooks.post_message as post_message
+from backend.log_to_gsheet import write_log  # ✅ บันทึก Google Sheet
 
 from fastapi import Request, status
 from starlette.responses import Response, StreamingResponse, JSONResponse
@@ -44,9 +45,6 @@ from open_webui.utils.filter import (
 )
 from open_webui.env import SRC_LOG_LEVELS, GLOBAL_LOG_LEVEL, BYPASS_MODEL_ACCESS_CONTROL
 
-# ✅ เพิ่มส่วนนี้
-from backend.log_to_gsheet import write_log
-
 logging.basicConfig(stream=sys.stdout, level=GLOBAL_LOG_LEVEL)
 log = logging.getLogger(__name__)
 log.setLevel(SRC_LOG_LEVELS["MAIN"])
@@ -64,7 +62,6 @@ async def generate_direct_chat_completion(
     user_id = metadata.get("user_id")
     session_id = metadata.get("session_id")
     request_id = str(uuid.uuid4())
-
     event_caller = get_event_call(metadata)
     channel = f"{user_id}:{session_id}:{request_id}"
 
@@ -234,7 +231,7 @@ async def generate_chat_completion(
         else:
             return convert_response_ollama_to_openai(response)
 
-    # ✅ ตรงนี้คือการเรียก openai ปกติ และเพิ่ม write_log
+    # ✅ ปิดท้ายตรงนี้: สำหรับ model ปกติ (OpenAI), แล้ว log
     res = await generate_openai_chat_completion(
         request=request,
         form_data=form_data,
@@ -243,7 +240,12 @@ async def generate_chat_completion(
     )
 
     try:
-        write_log(user.name, form_data.get("prompt", "-"), str(res))
+        prompt = form_data.get("prompt")
+        if not prompt and isinstance(form_data.get("messages"), list):
+            prompt = form_data["messages"][-1].get("content", "-")
+
+        answer = res.get("content") if isinstance(res, dict) else str(res)
+        write_log(user.name, prompt or "-", answer)
     except Exception as e:
         print("🛑 Logging to Google Sheet failed:", e)
 
