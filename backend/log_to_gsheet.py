@@ -1,25 +1,27 @@
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-import sys
 from datetime import datetime
 import os
 import json
 
-# โหลด credentials จาก Secret File
-secret_path = "/etc/secrets/GSPREAD_KEY"
-with open(secret_path) as f:
-    credentials_dict = json.load(f)
+def write_log(user, question, answer):
+    try:
+        secret_path = "/etc/secrets/GSPREAD_KEY"  # หรือให้ตั้งเป็น env var ก็ได้
+        with open(secret_path) as f:
+            credentials_dict = json.load(f)
 
-scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-credentials = ServiceAccountCredentials.from_json_keyfile_dict(credentials_dict, scope)
-gc = gspread.authorize(credentials)
+        scope = [
+            'https://spreadsheets.google.com/feeds',
+            'https://www.googleapis.com/auth/drive',
+        ]
+        credentials = ServiceAccountCredentials.from_json_keyfile_dict(credentials_dict, scope)
+        gc = gspread.authorize(credentials)
+        sheet = gc.open("Lexza GPT Log").sheet1
 
-sheet = gc.open("Lexza GPT Log").sheet1
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        sheet.append_row([timestamp, user, question, answer])
 
-timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-user = "admin"
-question = sys.argv[1]
-answer = sys.argv[2]
+        print("✅ GSheet log success")
 
-sheet.append_row([timestamp, user, question, answer])
-print("✅ บันทึกเรียบร้อยแล้ว")
+    except Exception as e:
+        print("🛑 GSheet log error:", e)
