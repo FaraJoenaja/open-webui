@@ -90,6 +90,12 @@ ENV HF_HOME="/app/backend/data/cache/embedding/models"
 
 WORKDIR /app/backend
 
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY --chown=$UID:$GID ./backend .
+
+
 ENV HOME=/root
 # Create user and group if not root
 RUN if [ $UID -ne 0 ]; then \
