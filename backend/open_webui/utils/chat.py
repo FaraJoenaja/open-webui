@@ -2,6 +2,7 @@ import time
 import logging
 import sys
 import uuid
+from typing import Any
 import json
 import asyncio
 import backend.api.hooks.post_message as post_message
@@ -40,9 +41,13 @@ from open_webui.utils.filter import (
 )
 from open_webui.env import SRC_LOG_LEVELS, GLOBAL_LOG_LEVEL, BYPASS_MODEL_ACCESS_CONTROL
 
+import inspect
+import random
+
 logging.basicConfig(stream=sys.stdout, level=GLOBAL_LOG_LEVEL)
 log = logging.getLogger(__name__)
 log.setLevel(SRC_LOG_LEVELS["MAIN"])
+
 
 async def generate_direct_chat_completion(
     request: Request,
@@ -55,7 +60,7 @@ async def generate_direct_chat_completion(
     metadata = form_data.pop("metadata", {})
     user_id = metadata.get("user_id")
     session_id = metadata.get("session_id")
-    request_id = str(uuid.uuid4())  # Generate a unique request ID
+    request_id = str(uuid.uuid4())
 
     event_caller = get_event_call(metadata)
     channel = f"{user_id}:{session_id}:{request_id}"
@@ -64,15 +69,10 @@ async def generate_direct_chat_completion(
         q = asyncio.Queue()
 
         async def message_listener(sid, data):
-            """
-            Handle received socket messages and push them into the queue.
-            """
             await q.put(data)
 
-        # Register the listener
         sio.on(channel, message_listener)
 
-        # Start processing chat completion in background
         res = await event_caller(
             {
                 "type": "request:chat:completion",
@@ -88,31 +88,26 @@ async def generate_direct_chat_completion(
         log.info(f"res: {res}")
 
         if res.get("status", False):
-            # Define a generator to stream responses
             async def event_generator():
                 nonlocal q
                 try:
                     while True:
-                        data = await q.get()  # Wait for new messages
+                        data = await q.get()
                         if isinstance(data, dict):
                             if "done" in data and data["done"]:
-                                break  # Stop streaming when 'done' is received
-
+                                break
                             yield f"data: {json.dumps(data)}\n\n"
                         elif isinstance(data, str):
                             yield data
                 except Exception as e:
                     log.debug(f"Error in event generator: {e}")
-                    pass
 
-            # Define a background task to run the event generator
             async def background():
                 try:
                     del sio.handlers["/"][channel]
-                except Exception as e:
+                except Exception:
                     pass
 
-            # Return the streaming response
             return StreamingResponse(
                 event_generator(), media_type="text/event-stream", background=background
             )
@@ -135,6 +130,7 @@ async def generate_direct_chat_completion(
             raise Exception(res["error"])
 
         return res
+
 
 async def generate_chat_completion(
     request: Request,
@@ -174,7 +170,6 @@ async def generate_chat_completion(
             request, form_data, user=user, models=models
         )
     else:
-        # Check if user has access to the model
         if not bypass_filter and user.role == "user":
             try:
                 check_model_access(user, model)
@@ -184,28 +179,21 @@ async def generate_chat_completion(
         if model.get("owned_by") == "arena":
             model_ids = model.get("info", {}).get("meta", {}).get("model_ids")
             filter_mode = model.get("info", {}).get("meta", {}).get("filter_mode")
+
             if model_ids and filter_mode == "exclude":
                 model_ids = [
-                    model["id"]
-                    for model in list(request.app.state.MODELS.values())
-                    if model.get("owned_by") != "arena" and model["id"] not in model_ids
+                    m["id"]
+                    for m in list(request.app.state.MODELS.values())
+                    if m.get("owned_by") != "arena" and m["id"] not in model_ids
                 ]
 
-            selected_model_id = None
-            if isinstance(model_ids, list) and model_ids:
-                selected_model_id = random.choice(model_ids)
-            else:
-                model_ids = [
-                    model["id"]
-                    for model in list(request.app.state.MODELS.values())
-                    if model.get("owned_by") != "arena"
-                ]
-                selected_model_id = random.choice(model_ids)
+            selected_model_id = random.choice(model_ids) if model_ids else random.choice(
+                [m["id"] for m in list(request.app.state.MODELS.values()) if m.get("owned_by") != "arena"]
+            )
 
             form_data["model"] = selected_model_id
 
             if form_data.get("stream") == True:
-
                 async def stream_wrapper(stream):
                     yield f"data: {json.dumps({'selected_model_id': selected_model_id})}\n\n"
                     async for chunk in stream:
@@ -230,12 +218,11 @@ async def generate_chat_completion(
                 }
 
         if model.get("pipe"):
-            # Below does not require bypass_filter because this is the only route the uses this function and it is already bypassing the filter
             return await generate_function_chat_completion(
                 request, form_data, user=user, models=models
             )
+
         if model.get("owned_by") == "ollama":
-            # Using /ollama/api/chat endpoint
             form_data = convert_payload_openai_to_ollama(form_data)
             response = await generate_ollama_chat_completion(
                 request=request,
@@ -252,193 +239,13 @@ async def generate_chat_completion(
                 )
             else:
                 return convert_response_ollama_to_openai(response)
-        else:
-            return await generate_openai_chat_completion(
-                request=request,
-                form_data=form_data,
-                user=user,
-                bypass_filter=bypass_filter,
-            )
+
+        return await generate_openai_chat_completion(
+            request=request,
+            form_data=form_data,
+            user=user,
+            bypass_filter=bypass_filter,
+        )
 
 
 chat_completion = generate_chat_completion
-
-
-async def chat_completed(request: Request, form_data: dict, user: Any):
-    if not request.app.state.MODELS:
-        await get_all_models(request, user=user)
-
-    if getattr(request.state, "direct", False) and hasattr(request.state, "model"):
-        models = {
-            request.state.model["id"]: request.state.model,
-        }
-    else:
-        models = request.app.state.MODELS
-
-    data = form_data
-    model_id = data["model"]
-    if model_id not in models:
-        raise Exception("Model not found")
-
-    model = models[model_id]
-
-    try:
-        data = await process_pipeline_outlet_filter(request, data, user, models)
-    except Exception as e:
-        return Exception(f"Error: {e}")
-
-    metadata = {
-        "chat_id": data["chat_id"],
-        "message_id": data["id"],
-        "session_id": data["session_id"],
-        "user_id": user.id,
-    }
-
-    extra_params = {
-        "__event_emitter__": get_event_emitter(metadata),
-        "__event_call__": get_event_call(metadata),
-        "__user__": {
-            "id": user.id,
-            "email": user.email,
-            "name": user.name,
-            "role": user.role,
-        },
-        "__metadata__": metadata,
-        "__request__": request,
-        "__model__": model,
-    }
-
-    try:
-        filter_functions = [
-            Functions.get_function_by_id(filter_id)
-            for filter_id in get_sorted_filter_ids(model)
-        ]
-
-        result, _ = await process_filter_functions(
-            request=request,
-            filter_functions=filter_functions,
-            filter_type="outlet",
-            form_data=data,
-            extra_params=extra_params,
-        )
-        return result
-    except Exception as e:
-        return Exception(f"Error: {e}")
-
-
-async def chat_action(request: Request, action_id: str, form_data: dict, user: Any):
-    if "." in action_id:
-        action_id, sub_action_id = action_id.split(".")
-    else:
-        sub_action_id = None
-
-    action = Functions.get_function_by_id(action_id)
-    if not action:
-        raise Exception(f"Action not found: {action_id}")
-
-    if not request.app.state.MODELS:
-        await get_all_models(request, user=user)
-
-    if getattr(request.state, "direct", False) and hasattr(request.state, "model"):
-        models = {
-            request.state.model["id"]: request.state.model,
-        }
-    else:
-        models = request.app.state.MODELS
-
-    data = form_data
-    model_id = data["model"]
-
-    if model_id not in models:
-        raise Exception("Model not found")
-    model = models[model_id]
-
-    __event_emitter__ = get_event_emitter(
-        {
-            "chat_id": data["chat_id"],
-            "message_id": data["id"],
-            "session_id": data["session_id"],
-            "user_id": user.id,
-        }
-    )
-    __event_call__ = get_event_call(
-        {
-            "chat_id": data["chat_id"],
-            "message_id": data["id"],
-            "session_id": data["session_id"],
-            "user_id": user.id,
-        }
-    )
-
-    if action_id in request.app.state.FUNCTIONS:
-        function_module = request.app.state.FUNCTIONS[action_id]
-    else:
-        function_module, _, _ = load_function_module_by_id(action_id)
-        request.app.state.FUNCTIONS[action_id] = function_module
-
-    if hasattr(function_module, "valves") and hasattr(function_module, "Valves"):
-        valves = Functions.get_function_valves_by_id(action_id)
-        function_module.valves = function_module.Valves(**(valves if valves else {}))
-
-    if hasattr(function_module, "action"):
-        try:
-            action = function_module.action
-
-            # Get the signature of the function
-            sig = inspect.signature(action)
-            params = {"body": data}
-
-            # Extra parameters to be passed to the function
-            extra_params = {
-                "__model__": model,
-                "__id__": sub_action_id if sub_action_id is not None else action_id,
-                "__event_emitter__": __event_emitter__,
-                "__event_call__": __event_call__,
-                "__request__": request,
-            }
-
-            # Add extra params in contained in function signature
-            for key, value in extra_params.items():
-                if key in sig.parameters:
-                    params[key] = value
-
-            if "__user__" in sig.parameters:
-                __user__ = {
-                    "id": user.id,
-                    "email": user.email,
-                    "name": user.name,
-                    "role": user.role,
-                }
-
-                try:
-                    if hasattr(function_module, "UserValves"):
-                        __user__["valves"] = function_module.UserValves(
-                            **Functions.get_user_valves_by_id_and_user_id(
-                                action_id, user.id
-                            )
-                        )
-                except Exception as e:
-                    log.exception(f"Failed to get user values: {e}")
-
-                params = {**params, "__user__": __user__}
-
-            if inspect.iscoroutinefunction(action):
-                data = await action(**params)
-            else:
-                data = action(**params)
-
-            try:
-                post_message.handle(
-                    data["prompt"],
-                    user.name,
-                    metadata.get("chat_id", "unknown")
-                )
-            except Exception as e:
-                print("🛑 Failed to post message log:", e)
-
-            return data
-
-        except Exception as e:
-            return Exception(f"Error: {e}")
-
-    return data
