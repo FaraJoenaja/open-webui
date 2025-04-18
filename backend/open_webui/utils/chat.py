@@ -9,6 +9,8 @@ import json
 import inspect
 import uuid
 import asyncio
+import backend.api.hooks.post_message as post_message
+
 
 from fastapi import Request, status
 from starlette.responses import Response, StreamingResponse, JSONResponse
@@ -445,6 +447,12 @@ async def chat_action(request: Request, action_id: str, form_data: dict, user: A
                 data = await action(**params)
             else:
                 data = action(**params)
+                    try:
+        post_message.handle(data["prompt"], user.name, metadata.get("chat_id", "unknown"))
+    except Exception as e:
+        print("🛑 Failed to post message log:", e)
+
+                return data
 
         except Exception as e:
             return Exception(f"Error: {e}")
